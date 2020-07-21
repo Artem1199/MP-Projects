@@ -1,0 +1,271 @@
+//Defines Section
+#define HWREG(x) (*((volatile unsigned int *)(x)))
+
+//MUX Defines
+#define MUX 0x44E10000
+
+//I2C defines
+#define I2C1                0x4802A000
+#define I2C_PSC             0xB0
+#define I2C_SCLL            0xB4
+#define I2C_SCLH            0xB8
+#define I2C_0A              0xA8
+#define I2C_CON             0xA4
+#define I2C_DATA            0x9C
+#define I2C_IRQSTATUS_RAW   0x24
+#define I2C_SA              0xAC
+#define I2C_CNT             0x98
+#define I2C_BUF             0x94
+#define I2C_SYSC            0x10
+#define I2C_IRQENABLE_SET   0x2C
+#define I2C_IRQENABLE_CLR   0x30
+#define I2C_IRQSTATUS       0x28
+
+#define INTC                0x48200000
+#define INTC_MIR_CLEAR2     0xC8
+#define INTC_SYSCONFIG      0x10
+
+
+//other defines
+#define CLKWKUPS 0x44E00000
+
+//Function Declarations
+
+void IntMasterIRQEnable();
+void int_handler();
+void clearxdry();
+void I2C_start();
+void delay ();
+void pollxdry();
+void wait_loop();
+void pollbb();
+void send_init();
+void send_data();
+void pass_on();
+void BF_int();
+void XDRY_int();
+
+//global variables
+volatile unsigned int current_state = 1; // tracks if init or data
+volatile unsigned int si = 1; //tracker for initia send
+volatile unsigned int sd = 1; //tracker for data send
+
+int init_data[11] = {0x00, 0x00, 0x38, 0x39, 0x14, 0x78, 0x5E, 0x6D, 0x0E, 0x01, 0x06}; //initialization data
+int char_data[8] = {0x00, 0x40, 'A', 'r', ' ', 't', 'e', 'm'};
+
+int x;
+int dcount_init = 10;
+int dcount_data = 6;
+volatile unsigned int USR_STACK[100];
+volatile unsigned int INT_STACK[100];
+
+     int main(void) {
+//SET UP STACKS
+//init USR stack
+asm("LDR R13, =USR_STACK");
+asm("ADD R13, R13, #0x100");
+//init IRQ stack
+asm("CPS #0x12");
+asm("LDR R13, =INT_STACK");
+asm("ADD R13, R13, #0x100");
+asm("CPS #0x13");
+
+current_state = 1; //reset variable values for toubleshooting
+si = 1; //reset variable values for toubleshooting
+sd = 1; //reset variable values for toubleshooting
+
+//MUX Remap
+HWREG(MUX + 0x958) = 0x7A; //conf_spi0_cs0 - SDA
+HWREG(MUX + 0x95C) = 0x7A; //conf_spi0_d1 - SCL
+
+/*ENABLE INTERRUPTS*/
+HWREG(INTC + INTC_SYSCONFIG) = 0x2;  //soft reset for interrupt
+HWREG(INTC + INTC_MIR_CLEAR2) = 0x80;  //I2C1INT at 71, bit 7
+delay(300);
+
+//Enable I2C
+HWREG(CLKWKUPS + 0x48) = 0x2; //I2C Initialize
+delay(300);
+
+//I2C initialize
+HWREG(I2C1 + I2C_SYSC) = 0x02; //soft reset before starting
+delay(300);
+HWREG(I2C1 + I2C_PSC) = 0x03; //setup prescaler with divider
+delay(300);
+HWREG(I2C1 + I2C_SCLL) = 0x35; //setup tLOW value for SCL
+delay(300);
+HWREG(I2C1 + I2C_SCLH) = 0x37; //setup tHIGH value for SCL
+delay(300);
+HWREG(I2C1 + I2C_0A) = 0x00; //configure own address, CHECK?
+delay(300);
+
+/*XDRY Interrupts*/
+HWREG(I2C1 + I2C_IRQENABLE_SET) = 0x10; //xdry bit 4
+delay(300);
+
+HWREG(I2C1 + I2C_CON) = 0x8600; // take out of reset, enable master, enable tx
+delay(300);
+
+
+
+
+HWREG(I2C1 + I2C_SA) = 0x03C; //Slave address
+delay(300);
+
+HWREG(I2C1+I2C_CNT) = 0xA;
+delay(300);
+
+
+pollbb();
+delay(300);
+
+
+
+HWREG(I2C1 + I2C_CON) = 0x8603; //START CONDITION
+
+IntMasterIRQEnable();
+
+
+
+
+
+wait_loop();
+return 0;
+}
+
+
+
+
+void wait_loop(void)
+{
+while(1)
+{
+//do nothing loop
+}
+}
+
+
+void pollbb(void)
+{
+    if((HWREG(I2C1 + I2C_IRQSTATUS_RAW) &= 0x1000)== 0x1000)
+    {
+        pollbb();
+    }
+}
+
+void pollxdry(void)
+{
+    if((HWREG(I2C1 + I2C_IRQSTATUS_RAW) &= 0x10)!= 0x10)
+    {
+        pollxdry();
+    }
+}
+
+void clearxdry(void)
+{
+    (HWREG(I2C1 + I2C_IRQSTATUS_RAW)= 0x10);
+}
+
+
+void I2C_start(void)
+{
+    HWREG(I2C1 + I2C_CON) = 0x8603; //start condition for I2C
+}
+
+void send_init(void)
+{
+
+
+	delay(300);
+    HWREG(I2C1 + I2C_DATA) = init_data[si];
+    si++;
+    delay(300);
+    if (si == 11)
+    {
+        current_state = 2;
+        pollbb();
+        I2C_start();
+    }
+
+}
+
+
+void send_data(void)
+{
+
+
+  //  delay(600);
+    HWREG(I2C1 + I2C_DATA) = char_data[sd];
+    sd++;
+  //  delay(600);
+    if (sd == 7)
+    {
+        current_state = 3;
+    }
+
+}
+
+
+
+
+void int_handler(void)
+{
+if(HWREG(INTC + 0xD8) == 0x80)
+{
+    if ((HWREG(I2C1 + I2C_IRQSTATUS) &=0x10) == 0x10)
+    {
+        XDRY_int();
+    }
+}
+asm("LDMFD SP!, {LR}");
+asm("LDMFD SP!, {LR}");
+asm("SUBS PC, LR, #0x4");
+
+}
+
+
+void XDRY_int()
+{
+    HWREG(INTC+0x48) = 0x1; //Allow for new IRQ in INTC_CONTROL
+
+    HWREG(I2C1 + I2C_IRQSTATUS) = 0x10; //reset XDRY interrupt
+    if (current_state == 1)  //check if init has been done
+                {
+            send_init();
+                }
+        else if (current_state == 2) //check if data has been sent
+                {
+            send_data();
+                }
+        else
+        		{
+        	HWREG(I2C1 + I2C_IRQENABLE_CLR) = 0x10; //disables interrupts from I2C
+        		}
+}
+
+
+
+
+
+void delay (int d)
+{
+    int c = d;
+    int a, b;
+
+       for (a = 1; a <= c; a++)
+           for (b = 1; b <= d; b++)
+           {}
+}
+
+
+
+void IntMasterIRQEnable(void)
+{
+asm("MRS r0, CPSR");
+asm("BIC r0, r0, #0x80");
+asm("MSR CPSR_c, R0");
+}
+
+
+
+

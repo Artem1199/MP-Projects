@@ -1,0 +1,355 @@
+@Artem Kulakevich
+@2/7/2019
+@Professor Douglas Hall
+@MAINLINE: Initializes, stack 1 and 2, enable GPIO2_1 interrupt, initializes interrupt for button, 
+@initializes falling edge detect, remaps the MUX for LCD data pins, initializes UART, initalizes clock,
+@initializes LEDs,
+@INT_DIRECTOR: Redirects interrupt for button and UART
+@BUTTON_SVC: Enables UART interrupts
+@TALKER_SVC: Verifies UART and talker board readiness, redirects to NOMODEM or SEND_CHAR
+@NOMODEM: Either masks INT values or PASS_ON depending on interrupt conditions
+@SEND_CHAR: Sends a character to the UART, repeats on each interrupt until running out of characters
+
+.text
+.global _start
+.global INT_DIRECTOR
+_start:
+
+
+	LDR R13,=STACK1		@setup stack
+	ADD R13, R13, #0x100	
+	CPS #0x12		@Enters interrupt condition
+	LDR R13, =STACK2	@Setup stack2 for interrupts
+	ADD R13, R13, #0x100
+	CPS #0x13		@Leaves interrupt conditions
+
+@Enables clocks for GPIO and UART
+	MOV R0, #0x02		
+	LDR R1, =0x44E000AC	@GPIO1 clock address
+	STR R0, [R1]		@Turning on clock for GPIO1
+	LDR R1, =0x44E000B0	
+	STR R0, [R1]		@Turning on clock for GPIO2
+	LDR R1, =0x44E00038
+	STR R0, [R1]		@Turn on clock for UART5
+
+	
+@LEDS
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R4, #0x01E00000 	@Value for clearing LEDS
+	ADD R5, R0, #0x190	@Offset to clearout
+	STR R4, [R5]		@Clears LEDS
+	LDR R6, =0xFE1FFFFF 	@0s for bits 21-24
+	ADD R5, R0, #0x134	@GPIO_OE Offset
+	LDR R2, [R5]		@READ GPIO_OE
+	AND R2, R2, R6		@WRITE GPIO_OE
+	STR R2, [R5]		@STORE
+
+
+	LDR R1, =0x481AC000 	@Base address for GPI02
+
+@Detect falling edge on GPIO2_1 and enable to assert POINTRPEND1
+	
+	LDR R6, =0x02		@Load value for pin 1 @SHOULD BE 0x02
+	ADD R5, R1, #0x14C	@FALLING_EDGEDETECT offset
+	LDR R2, [R5]		@READ
+	ORR R2, R2, R6		@MODIFY
+	STR R2, [R5]		@WRITE
+	ADD R5, R1, #0x34	@Offset for GPIO2_IRQSTATUS_SET_0
+	STR R6, [R5]		@Store offset for pin 1 in
+
+
+	
+@Initialize INTC
+	LDR R1, =0x48200000	@Address for INTC
+	MOV R2, #0x2		@Value to reset INTC with softreset
+	STR R2, [R1,#0x10]	@Address for INTC_Sysconfig
+	LDR R2, =0x10000000	@bit 28 for timer INTC_MIR_Clear2
+	STR R2, [R1,#0xC8]	@address to INTC_MIR_Clear2
+	LDR R2, =0x4001		@Value to unmask INTC INT 0, GPIOINT2A
+	STR R2, [R1,#0xA8]	@Store bit 0 in INTC_MIR_Clear1
+
+@Turn on TIMER4 CLK
+	MOV R2, #0x02		@Value to enable
+	LDR R1, =0x44E00088	@Base address for  CM_PER_TIMER4_CLKCTRL
+	STR R2, [R1]		
+	LDR R1, =0x44E00510	@Address for CLKSEL_TIMER4_CLK (Enable 32kHz)
+	STR R2, [R1]
+
+@Initilize Timer 4 registers, with counter, overflow interrupt generation
+	LDR R1, =0x48044000	@base for Timer 4 registers
+	MOV R2, #0x01
+	STR R2, [R1, #0x10] 	@reset Timer 4
+	MOV R2, #0x02		@Value for overflow interrupts
+	STR R2, [R1, #0x2C] 	@TIMER4_IRQEnable
+	LDR R2, =0xFFFF8000 	@Value for .5 seconds
+	STR R2, [R1, #0x40]	@TIMER4 TLDR for reload value
+	STR R2, [R1, #0x3C]	@TIMER4 TCRR Counter
+
+@Remapping mux for P8
+	LDR R0, =0x44E108D8	@Address for LCD_Data14
+	LDR R6, =0x2E		@input/mode 6
+	STR R6, [R0]		@WRITE
+	
+	LDR R0, =0x44E108DC	@Address for LCD_Data15
+	LDR R6, =0x0E		@output/mode 6
+	STR R6, [R0]		@WRITE
+	
+	LDR R0, =0x44E108C4 	@conf_lcd_data9 offset
+	LDR R6, =0x2C		@input/mode 4
+	STR R6, [R0]		@WRITE
+	
+	LDR R0, =0x44E108C0 	@conf_lcd_data8 offset
+	LDR R6, =0x0C		@output/mode 4
+	STR R6, [R0]		@WRITE
+
+@Switch UART5 to mode A, setup for 8 bit, one stop, no parity
+	MOV R2, #0x83		@Value to enable 8bit, one stop, no parity, mode A
+	LDR R0, =0x481AA00C	@Offset address for UART_LCR
+	STR R2, [R0]		
+	
+	LDR R0, =0x481AA000	@Setup for 38.4kps
+	MOV R2, #0x4E		@Value for DLL
+	STR R2, [R0]		@Mode A UART_DLL, no offset value
+	
+	LDR R0, =0x481AA004	@UART_DLH Address
+	MOV R2, #0x00		@Value for UART_DLH
+	STR R2, [R0]		@Mode A, UART_DLH offset
+	
+	LDR R0, =0x481AA020	@MDR1 offset address
+	MOV R2, #0x00		@value for 16bit on MDR1
+	STR R2, [R0]		@Mode A, MDR1 offset
+	
+	
+	MOV R2, #0x03		@Enable 8bit one stop, no parity
+	LDR R0, =0x481AA00C	@Address for LCR
+	STR R2, [R0]		@LCR offset, disables MODE A, keeps 8 bit, one stop, no parity
+
+	MOV R2, #0x6		@Value to disable RX FIFO, TX FIFO, FIFO_EN
+	LDR R0, =0x481AA008	@UART_FCR address
+	STR R2, [R0]		
+
+
+	
+@ Making sure to to enable IRQ in CPSR
+	MRS R3, CPSR
+	BIC R3, #0x80		@Value to enable interrupts
+	MSR CPSR_c, R3
+		
+	
+IDLE:
+	NOP			@wait for interrupt
+	B IDLE
+
+INT_DIRECTOR:
+
+	STMFD SP!, {R0-R6, LR} @Storing all registers
+	
+@Test bit 14 of IRQ for UART
+	LDR R0, =0x482000B8	@(UART5INT) at INTC_PENDING_IRQ1
+	LDR R1, [R0]		@load value out of register
+	TST R1, #0x4000		@Test bit 14 for UART interrupt
+	BEQ TCHK		@If that was not the source of the interrupt then check timer
+@Check IIT of IIR_UART
+	LDR R0, =0x481AA008	@Address for IIR_UART
+	LDR R1, [R0]		@Load value of IIR_UART
+	TST R1, #0x01		@Test bit 0 of IIR_UART
+	BEQ TALKER_SVC		@If IIT pin is set branch to TALKER_SVC
+
+B PASS_ON
+	
+
+TCHK:
+@Test if the IRQ request
+	LDR R0, =0x482000D8	@Address to INTC_Pending_IRQ2
+	LDR R1, [R0]
+	TST R1, #0x10000000	@Testing bit 28 in Pending IRQ2
+	BEQ BCHK			@Return to mainline if it wasn't from IRQ2
+@Test for overflow
+	LDR R0, =0x48044028	@Address for TIMER4_IRQStatus
+	LDR R1, [R0]
+	TST R1, #0x02 		@Testing Bit 1 for overflow trigger
+	BEQ PASS_ON			@Return to mainlane if it wasn't from overflow
+	MOV R2, #0x02		@Store 0x02 in TIMER4_IRQSTATUS for reset
+	STR R2, [R0]		@Storing value should reset the overflow trigger
+	
+	LDR R0, =0x481AA004	@Address two IER_UART
+	MOV R1, #0xA		@Value to enable THRIT and MODEMSTSIT
+	STR R1, [R0]		@Store value for enable interrupt
+
+	LDR R0, =0x0481AA010 @UART_MCR Register
+	MOV R1, #0x2			@RTS BIT
+	STR R1, [R0]
+	
+	B PASS_ON
+	
+BCHK:
+@Check bit 0 of IRQ
+	LDR R0, =0x482000B8	@Testing bit 0 (GPIO2A) at INTC_PENDING_IRQ1
+	LDR R1, [R0]		
+	TST R1, #0x01		@Tested
+	BEQ PASS_ON			@If that was not the source of the interrupt then leave
+
+@Check bit 1 of GPIO2_IRQ
+	LDR R0, =0x481AC02C	@Offset for GPIO2_IRQSTATUS_0
+	LDR R1, [R0]
+	TST R1, #0x02		@Test to see if that was our GPIO2 button push (Bit 1) GPIO2
+	BNE BUTTON_SVC		@if it was then, service the button
+	BEQ PASS_ON			@if not then ignore and pass on
+
+	
+PASS_ON:				@undoes everything and returns
+	LDR R0, =0x48200048 @Address for INTC_Control
+	MOV R1, #01			@Value to clear INTC_control for IRQ request
+	STR R1, [R0]		@NEWIRA bit set
+	LDMFD SP!, {R0-R6, LR}
+	SUBS PC, LR, #4		@standard return procedure for interrupts
+	
+BUTTON_SVC:
+	LDR R0, =0x481AC02C @GPIO2_IRQSTATUS_0
+	MOV R1, #0x02
+	STR R1, [R0]		@0x02 in GPIO2_IRQSTATUS_0 to reset request
+	
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R4, #0x01E00000 @Value for clearing LEDS
+	ADD R5, R0, #0x190	@Offset to clearout
+	STR R4, [R5]		@Clears LEDS
+
+	MOV R2, #0x01		@value to start timer
+	LDR R1, =0x48044038	@TIMER4 TCLR register
+	STR R2, [R1]		@Write to TCLR register
+
+
+	B PASS_ON
+	
+	
+TALKER_SVC:
+
+	LDR R0, =0x481AA018 @Base address for modem status registers
+	LDR R1, [R0]
+	TST R1, #0x30		@Value to test Modem Status Register (USING 0x30 instead of 0x10 because of bit 5 being 1)
+	
+	BEQ NOMODEM
+	
+	LDR R0, =0x481AA014 @LSR_UART Address.
+	LDR R1, [R0] 
+	TST R1, #0x20		@Test THR at LSR_UART
+	
+	BNE SEND_CHAR
+	B PASS_ON
+	
+	
+	
+@UNMASK THR, SEND CHARACTER
+	
+SEND_CHAR:
+	
+	LDR R1, =CHAR_PTR	@Load ptr to character ptr
+	LDR R2, =CHAR_COUNT	@Load ptr to character_count
+	LDR	R3, [R1]		@address of desired character
+	LDR R4, [R2]		@gets current character counter
+	LDRB R5, [R3], #1	@Read character to be sent, and increment ptr to next character
+	STR	R3, [R1]		@Store pointer towards next character
+	LDR R0, =0x481AA000	@Pointer to transmit holder registers
+	STRB R5, [R0]		@Place read character into transmit hold
+
+	SUBS R4, R4, #1		@Subtrack counter value
+	STR R4, [R2]		@Store counter value back in data
+	
+	
+	
+@DISABLE UART INTERRUPT
+	LDR R0, =0x481AA004	@Address two IER_UART
+	MOV R1, #0x0		@Value to disable THRIT and MODEMSTSIT
+	STR R1, [R0]		@Store value for disable interrupt
+@------------------------
+
+@RELOAD TIMER
+	LDR R1, =0x4804403C	@base for Timer 4 registers
+	LDR R2, =0xFFFF8000 @Value for .5 seconds
+	STR R2, [R1]	@TIMER4 TCRR Counter - reload timer
+	
+	
+@START TIMER
+	MOV	R2, #0x00
+	MOVPL R2, #0x01		@IF THIS ISN'T THE LAST CHARACTER
+	
+	LDR R1, =0x48044038	@TIMER4 TCLR register
+	STR R2, [R1]		@Write to TCLR register
+	
+	BPL PASS_ON			@Pass_ON if this isn't the last character
+	
+@If last character is reached
+	
+	LDR R1, =CHAR_PTR
+	LDR R3, =MESSAGE	@Load pointer to start of message
+	STR R3, [R1]		@Place 1st character of message back into CHAR_PTR
+	
+	LDR R2, =CHAR_COUNT	@Load ptr to character_count
+	MOV R3, #26			@Value for character count CHANGE IF NECESSARY for UART_COUNT
+	STR R3, [R2]		@Reload character length back into memory
+	
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	LDR R1, =0x00200000	@Value for LED1 GPIO Pin
+	STR R1, [R0,#0x194]	@Address to GPIO_SetDataout
+
+	B PASS_ON
+	
+
+@TEST LSR FOR THR, IF NOT TRUE THEN MASK THR
+NOMODEM:
+
+
+	LDR R0, =0x481AA060 @Base address for UART5 LSR_UART5
+	LDR R1, [R0]	@LSR_UART5 address
+	TST R1, #0x20		@Test bit 2 of LSR_UART5 fpr 
+	BNE PASS_ON			@If not true, then leave
+	MOV R1, #0b00		@MASK THR INT value
+	LDR R0, =0x481AA004 @Store value to mask THR
+	STR R1, [R0]	@Store value to mask THR
+	B PASS_ON
+
+
+.data	
+.align 2
+MESSAGE:
+
+.byte 0x01
+.word 0x4f31
+.byte 0x01
+
+.ascii "10"
+.byte 0x0d
+.ascii "9"
+.byte 0x0d
+.ascii "8"
+.byte 0x0d
+.ascii "7"
+.byte 0x0d
+.ascii "6"
+.byte 0x0d
+.ascii "5"
+.byte 0x0d
+.ascii "4"
+.byte 0x0d
+.ascii "3"
+.byte 0x0d
+.ascii "2"
+.byte 0x0d
+.ascii "1"
+.byte 0x0d
+.ascii "0"
+.byte 0x0d
+.ascii "blstof"
+.byte 0x0d
+.align 2
+CHAR_PTR: .word MESSAGE
+CHAR_COUNT: .word 26 		@CHANGEO THERES ASWELL
+
+.align 2
+STACK1:			.rept 256
+				.byte 0x00
+				.endr
+STACK2:			.rept 256
+				.byte 0x00
+				.endr
+.END

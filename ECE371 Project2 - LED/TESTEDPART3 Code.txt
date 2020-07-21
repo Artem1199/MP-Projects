@@ -1,0 +1,189 @@
+@Artem Kulakevich
+@PART 3 - 12/6/2018
+@This Program enables GPIO1 and GPIO2 clock, then initializes the USER LEDs
+@ on GPIO1_21-24, and initializes the GPIO2_1 to allow for button pushes, falling edge detect
+@ and IRQ generation from the falling edge.  After initializing GPIO1/GPIO2, the program turns
+@ on IRQ in CPSR and enters an idle program that waits for interrupts.
+@INT_DIRECTOR: Tests if the IRQ came from our button, then tests if the IRQ interrupt came from our GPIO1
+@ if the interrupt came from our button then hands over to BUTTON_SVC
+@ If the interrupt did not comes from the button, then hands over to TCHK
+@ if the IRQ came from the timer
+@TCHK: Checks if the interrupt came from the DMTIMER4 IRQ, then checks if the overflow for TIMER4 was triggers,
+@ Hands over to LED if the timer was trigger
+@Button_SVC: Resets button IRQ, test to see if LEDs are on/off, then turns the LEDS OFF/ON, and hands over to LED
+@LED:  Test to see if the LEDs should be on/off, and turns on the pattern depending on that
+.text
+.global _start
+.global INT_DIRECTOR
+_start:
+	LDR R13,=STACK1			@setup stack
+	ADD R13, R13, #0x100	
+	CPS #0x12
+	LDR R13, =STACK2
+	ADD R13, R13, #0x100
+	CPS #0x13
+	MOV R0, #0x02			
+	LDR R1, =0x44E000AC		@GPIO1 clock address
+	STR R0, [R1]			@Turning on clock for GPIO1
+	LDR R1, =0x44E000B0	
+	STR R0, [R1]			@Turning on clock for GPIO2
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	LDR R1, =0x481AC000 @Base address for GPI02
+@LEDS
+	MOV R4, #0x01E00000 @Value for clearing LEDS
+	ADD R5, R0, #0x190	@Offset to clearout
+	STR R4, [R5]		@Clears LEDS
+	LDR R6, =0xFE1FFFFF @0s for bits 21-24
+	ADD R5, R0, #0x134	@GPIO_OE Offset
+	LDR R2, [R5]		@READ GPIO_OE
+	AND R2, R2, R6		@WRITE GPIO_OE
+	STR R2, [R5]		@STORE
+@Detect falling edge on GPIO2_1 and enable to assert POINTRPEND1
+	LDR R6, =0x02		@Load value for pin 1 @SHOULD BE 0x02
+	ADD R5, R1, #0x14C	@FALLING_EDGEDETECT offset
+	LDR R2, [R5]		@READ
+	ORR R2, R2, R6		@MODIFY
+	STR R2, [R5]		@WRITE
+	ADD R5, R1, #0x34	@Offset for GPIO2_IRQSTATUS_SET_0
+	STR R6, [R5]		@Store offset for pin 1 in
+@Initialize INTC
+	LDR R1, =0x48200000	@Address for INTC
+	MOV R2, #0x2		@Value to reset INTC with softreset
+	STR R2, [R1,#0x10]	@Address for INTC_Sysconfig
+	LDR R2, =0x10000000	@bit 28 for timer INTC_MIR_Clear2
+	STR R2, [R1,#0xC8]	@address to INTC_MIR_Clear2
+	MOV R2, #0x01		@Value to unmask INTC INT 0, GPIOINT2A
+	STR R2, [R1,#0xA8]	@Store bit 0 in INTC_MIR_Clear1
+@Turn on TIMER4 CLK
+	MOV R2, #0x02		@Value to enable
+	LDR R1, =0x44E00088	@Base address for  CM_PER_TIMER4_CLKCTRL
+	STR R2, [R1]		
+	LDR R1, =0x44E00510	@Address for CLKSEL_TIMER4_CLK (Enable 32kHz)
+	STR R2, [R1]
+@Initilize Timer 4 registers, with counter, overflow interrupt generation
+	LDR R1, =0x48044000	@base for Timer 4 registers
+	MOV R2, #0x01
+	STR R2, [R1, #0x10] @reset Timer 4
+	MOV R2, #0x02		@Value for overflow interrupts
+	STR R2, [R1, #0x2C] @TIMER4_IRQEnable
+	LDR R2, =0xFFFF8000 @Value for .5 seconds
+	STR R2, [R1, #0x40]	@TIMER4 TLDR
+	STR R2, [R1, #0x3C]	@TIMER4 TCRR Counter
+@HOOOOK
+@	LDR R1, =0x4030CE38	@Literal pool for IRQ interrupts
+@	LDR R2, [R1]
+@	LDR R3, =SYS_IRQ	@Address to hold old IRQ address
+@	STR R2, [R3]
+@	LDR R2, =INT_DIRECTOR	@Address to OUR IRQ destination
+@	STR R2, [R1]
+@ Making sure to to enable IRQ in CPSR
+	MRS R3, CPSR
+	BIC R3, #0x80
+	MSR CPSR_c, R3
+IDLE: @Waits for interrupts
+	NOP
+	B IDLE
+INT_DIRECTOR:
+	STMFD SP!, {R0-R3, LR} @Storing all registers
+	LDR R0, =0x482000B8	@Testing bit 0 (GPIO2A) at INTC_PENDING_IRQ1
+	LDR R1, [R0]		
+	TST R1, #0x01		@Tested
+	BEQ TCHK			@If that was not the source of the interrupt then Check clock
+	LDR R0, =0x481AC02C	@Offset for GPIO2_IRQSTATUS_0
+	LDR R1, [R0]
+	TST R1, #0x02		@Test to see if that was our GPIO2 button push (Bit 1) GPIO2
+	BNE BUTTON_SVC		@if it was then, service the button
+	BEQ PASS_ON			@if not then ignore and pass on
+PASS_ON:				@undoes everything and returns
+	LDR R0, =0x48200048 @Address for INTC_Control
+	MOV R1, #01			@Value to clear INTC_control for IRQ request
+	STR R1, [R0]		@NEWIRA bit set
+	LDMFD SP!, {R0-R3, LR}
+	SUBS PC, LR, #4		@standard return procedure for interrupts
+BUTTON_SVC:
+	LDR R0, =0x481AC02C @GPIO2_IRQSTATUS_0
+	MOV R1, #0x02
+	STR R1, [R0]		@0x02 in GPIO2_IRQSTATUS_0 to reset request
+@FINALLY SERVICE BUTTON
+	LDR R0, =LEDSTATUS	@Loads LEDSTATUS register
+	LDR R1, [R0]		@puts value in R1
+	TST R1, #0x10		@best bit 4, to see if LEDS are enabled
+	MOVNE R1, #0x00		@if LEDs enabled, then turn off
+	MOVEQ R1, #0x10		@if LEDs disabled, then turn on
+	STR R1, [R0]		@Store the new led status in LEDSTATUS
+	MOV R2, #0x03		@value to auto reload timer and start
+	LDR R1, =0x48044038	@TIMER4 TCLR register
+	STR R2, [R1]		@Write to TCLR register
+	B LED				@Goes to LED to turn LEDS on/off	
+TCHK:
+@Test if the IRQ request
+	LDR R0, =0x482000D8	@Address to INTC_Pending_IRQ2
+	LDR R1, [R0]
+	TST R1, #0x10000000	@Testing bit 28 in Pending IRQ2
+	BEQ PASS_ON			@Return to mainline if it wasn't from IRQ2
+@Test for overflow
+	LDR R0, =0x48044028	@Address for TIMER4_IRQStatus
+	LDR R1, [R0]
+	TST R1, #0x02 		@Testing Bit 1 for overflow trigger
+	BEQ PASS_ON			@Return to mainlane if it wasn't from overflow
+	MOV R2, #0x02		@Store 0x02 in TIMER4_IRQSTATUS for reset
+	STR R2, [R0]		@Storing value should reset the overflow trigger
+	B LED
+LED: @Goes here after doing everything to turn LEDS on/off
+	LDR R0, =LEDSTATUS @Sets up R0
+	LDR R1, [R0]		@sets up R1 (current status of LEDs)
+	TST R1, #0x10		@Test to see if LEDs should be on
+	BEQ PASS_ON			@If Bit 4 is a 0, then ignore timer
+BIT0:	TST R1, #0x01	@tsts bit 0
+	BEQ BIT1			@if bit 0 is empty, then try next bit
+	ADD R2,R1, #0x01 @Increments LEDSTATUS and saves it
+	STR R2,[R0]
+@Clear all LEDs and Turn on LED2
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R1, #0x01E00000 @Value for clearing LEDS
+	STR R1, [R0,#0x190]	@Clears LEDS
+	LDR R1, =0x00400000	@Value for LED2 GPIO Pin
+	STR R1, [R0,#0x194]	@Address to GPIO_SetDataout
+	B PASS_ON
+BIT1:	TST R1, #0x02
+	BEQ BIT2			@if bit 1 is empty, then try next bit
+	ADD R2,R1, #0x02	@Increments LEDSTATUS and saves it
+	STR R2,[R0]
+@Clear all LEDs and Turn on LED3
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R1, #0x01E00000 @Value for clearing LEDS
+	STR R1, [R0,#0x190]	@Clears LEDS
+	LDR R1, =0x00800000	@Value for LED3 GPIO Pin
+	STR R1, [R0,#0x194]	@Address to GPIO_SetDataout
+	B PASS_ON
+BIT2:	TST R1, #0x04	@Test bit 2
+	BEQ BIT3			@If bit 2 is empty, then try next bit
+	ADD R2,R1, #0x04	@Increments LEDSTATUS and saves it
+	STR R2,[R0]
+@Clear all LEDs and Turn on LED3
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R1, #0x01E00000 @Value for clearing LEDS
+	STR R1, [R0,#0x190]	@Clears LEDS
+	LDR R1, =0x01000000	@Value for LED4 GPIO Pin
+	STR R1, [R0,#0x194]	@Address to GPIO_SetDataout
+	B PASS_ON
+BIT3: 				@if bits 0-2 are empty, then bit 3 must be full
+	MOV R2, #0x11	@Sets status, the LEDs = on, LED1 = on
+	STR R2, [R0]	@Stores value in LEDSTATUS
+@Clear all LEDs and Turn on LED3
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R1, #0x01E00000 @Value for clearing LEDS
+	STR R1, [R0,#0x190]	@Clears LEDS
+	LDR R1, =0x00200000	@Value for LED1 GPIO Pin
+	STR R1, [R0,#0x194]	@Address to GPIO_SetDataout
+	B PASS_ON
+.data	
+LEDSTATUS: .WORD 0x0
+.align 2
+STACK1:			.rept 256
+				.byte 0x00
+				.endr
+STACK2:			.rept 256
+				.byte 0x00
+				.endr
+.END

@@ -1,0 +1,92 @@
+@Artem Kulakevich
+@PART 1 - 12/6/2018
+@Program turns on the GPIO clock, clears GPIO1 bits 21-24, then turns on the bits to 
+@on/off using a delay loop
+@The program uses GPIO_OE, GPIO1 Clock, GPI01_CLEARDATAOUT, GPIO1_SETDATAOUT
+@It will run the LED loops on repeat, and it mostly a test of our ability to
+@ interface with GPIO1 and output data to a bit
+.text
+.global _start
+_start:
+	LDR R13,=STACK		@setup stack
+	ADD R13, R13, #0x100	
+	MOV R0, #0x02			
+	LDR R1, =0x44E000AC	@GPIO1 clock address
+	STR R0, [R1]		@Turning on clock for GPIO1
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	MOV R4, #0x01E00000 @Value for clearing LEDS
+	ADD R5, R0, #0x190	@Offset to clearout
+	STR R4, [R5]		@Clears LEDS
+	LDR R6, =0xFE1FFFFF @0s for bits 21-24
+	ADD R5, R0, #0x134	@GPIO_OE Offset
+	LDR R2, [R5]		@READ GPIO_OE
+	AND R2, R2, R6		@WRITE GPIO_OE
+	STR R2, [R5]		@STORE in GPIO_OE
+	MOV R7,#0x05
+LEDLOOP:
+	BL LED1 @This makes it easier to copy and paste code, 
+	BL LED2	@and do more with less effort
+	BL LED3
+	BL LED4
+	SUBS R7, R7, #0x01 @I wanted the LEDs to do more than just rotate
+	BNE LEDLOOP @The LEDs run through the same pattern 5 times, then
+				@All turn on, and all turn off.
+				@To make this loop go forever I can just change BNE LEDLOOP to B LEDLOOP
+	BL LEDALL	@pls don't dock me points for having fun
+	BL LED1		
+	BL LED4
+	NOP
+TIMER: STMFD R13!, {R5, R14} @Save used register to stack
+	LDR R5, =0x0009BC20		@setup timer value
+		SUB: SUBS R5, R5, #0x01 @decrement timer
+		BNE SUB					@look for imter
+	LDMFD R13!, {R5, PC}		@Return to mainline
+LED1:	
+	STMFD R13!, {R4, R5, R14} @Writing each LED as a procedure like this makes it easier to reuse
+								@and allows for more interesting patterns
+	LDR R4, =0x00200000 		@Bit 21 for USR LED 1
+	ADD R5, R0, #0x194		@Adding offset to GPIO1 Base address (GPIO1_SETDATAOUT)
+	STR R4, [R5]			@Writing high to USR LED 1
+	BL TIMER				@Call to timer
+	ADD R5, R0, #0x190		@Offset for GPI01_CLEARDATAOUT
+	STR R4, [R5]			@Sets USR LED 1 low
+	LDMFD R13!, {R4, R5, PC}		@Return to mainline
+LED2:	STMFD R13!, {R4, R5, R14}
+	LDR R4, =0x00400000	@Code to enable the next LED
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER
+	ADD R5, R0, #0x190
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+LED3: STMFD R13!, {R4, R5, R14} @Repeat of LED1
+	LDR R4, =0x00800000			@Code for next LED
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER
+	ADD R5, R0, #0x190
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+LED4: STMFD R13!, {R4, R5, R14}	@Repeat of LED1
+	LDR R4, =0x01000000			@Code for LED GPIO1 pin
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER
+	ADD R5, R0, #0x190			@Clears the LEDs are keeping them on
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+LEDALL: STMFD R13!, {R4, R5, R14}	@Turns all the LEDs on and then off
+	LDR R4, =0x01E00000
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER						
+	BL TIMER
+	BL TIMER
+	ADD R5, R0, #0x190
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+.data	
+.align 2
+STACK:			.rept 256
+				.byte 0x00
+				.endr

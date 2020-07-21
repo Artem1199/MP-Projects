@@ -1,0 +1,170 @@
+@Artem Kulakevich 
+@PART TWO - 12/6/2018
+@This Program enables GPIO1 and GPIO2 clock, then initializes the USER LEDs
+@ on GPIO1_21-24, and initializes the GPIO2_1 to allow for button pushes, falling edge detect
+@ and IRQ generation from the falling edge.  After initializing GPIO1/GPIO2, the program turns
+@ on IRQ in CPSR and enters an idle program that waits for interrupts.
+@INT_DIRECTOR: Tests if the IRQ came from our button, then tests if the IRQ interrupt came from our GPIO1
+@ if the interrupt came from our button, INT_DIRECTOR clears the bit and services the interrupt
+@ Button_SVC: Turns of NEWIRA, and either turns on the LEDs in the Idle program, or turns the off.
+.text
+.global _start
+.global INT_DIRECTOR
+_start:
+	LDR R13,=STACK1			@setup stack
+	ADD R13, R13, #0x100	
+	CPS #0x12
+	LDR R13, =STACK2		@Setup the secondary IRQ stack
+	ADD R13, R13, #0x100
+	CPS #0x13				@Turn back from IRQ stack
+	MOV R0, #0x02			@Value to enable clock
+	LDR R1, =0x44E000AC		@GPIO1 clock address
+	STR R0, [R1]			@Turning on clock for GPIO1
+	LDR R1, =0x44E000B0	
+	STR R0, [R1]			@Turning on clock for GPIO2
+	LDR R0, =0x4804C000	@Base address for GPIO1
+	LDR R1, =0x481AC000 @Base address for GPI02
+@LEDS
+	MOV R4, #0x01E00000 @Value for clearing LEDS
+	ADD R5, R0, #0x190	@Offset to clearout
+	STR R4, [R5]		@Clears LEDS
+	LDR R6, =0xFE1FFFFF @0s for bits 21-24
+	ADD R5, R0, #0x134	@GPIO_OE Offset
+	LDR R2, [R5]		@READ GPIO_OE
+	AND R2, R2, R6		@WRITE GPIO_OE
+	STR R2, [R5]		@STORE
+@Detect falling edge on GPIO2_1 and enable to assert POINTRPEND1	
+	LDR R6, =0x02		@Load value for pin 1 @SHOULD BE 0x02
+	ADD R5, R1, #0x14C	@FALLING_EDGEDETECT offset
+	LDR R2, [R5]		@READ
+	ORR R2, R2, R6		@MODIFY
+	STR R2, [R5]		@WRITE
+	ADD R5, R1, #0x34	@Offset for GPIO2_IRQSTATUS_SET_0
+	STR R6, [R5]		@Store offset for pin 1 in
+@Initilize INTC
+	LDR R1, =0x482000A8	@Address for INTC_MIR_CLEAR1
+	MOV R2, #0x01		@Value to unmask INTC INT 0, GPIOINT2A
+	STR R2, [R1]		@Store the pin in R1
+@HOOOOK
+@	LDR R1, =0x4030CE38	@Literal pool for IRQ interrupts
+@	LDR R2, [R1]
+@	LDR R3, =SYS_IRQ	@Address to hold old IRQ address
+@	STR R2, [R3]
+@	LDR R2, =INT_DIRECTOR	@Address to OUR IRQ destination
+@	STR R2, [R1]
+@ Making sure to to enable IRQ in CPSR
+	MRS R3, CPSR
+	BIC R3, #0x80
+	MSR CPSR_c, R3
+	LDR R7, =LEDSTATUS @TEST CODE
+	MOV R8, #1
+	STR R8, [R7]		@I turn the LEDs on early to make sure my program is working
+IDLE:
+	LDR R7, =LEDSTATUS 	@BIT 0 holds information about the current LED
+	LDR R8, [R7]
+	TST R8, #1 			@Test bit 1 to see if LEDs should be on
+	BNE LEDLOOP			@If LEDSTATUS should be on, then runs the LEDLOOP
+	B IDLE				@Goes back to polling the LEDSTATUS to see if LED should be on
+LEDLOOP:				@LEDLOOP, turns on LEDs, then turns them off
+	BL LED1
+	BL LED2
+	BL LED3
+	BL LED4
+	B IDLE				@Goes back to polling memory for LED STATUS
+NOP
+INT_DIRECTOR:
+	STMFD SP!, {R0-R3, LR} @Storing all registers
+	LDR R0, =0x482000B8	@Testing bit 0 (GPIO2A) at INTC_PENDING_IRQ1
+	LDR R1, [R0]		
+	TST R1, #0x00000001		@Tested
+	BEQ PASS_ON			@If that was not the source of the interrupt then pass on
+	LDR R0, =0x481AC02C	@Offset for GPIO2_IRQSTATUS_0
+	LDR R1, [R0]
+	TST R1, #0x02		@Test to see if that was our GPIO2 button push
+	BNE BUTTON_SVC		@if it was then, service the button
+	BEQ PASS_ON			@if not then ignore and pass on
+	SUBS PC, LR, #4
+PASS_ON:				@undoes everything and returns
+	LDMFD SP!, {R0-R3, LR}
+	SUBS PC, LR, #4		@standard return procedure for interrupts
+BUTTON_SVC:
+	LDR R0, =0x481AC02C
+	MOV R1, #0x02
+	STR R1, [R0]
+@Turn off NEWIRA bit in INTC_Control, so processer can respond to any new IRQ
+	LDR R0, =0x48200048 @Address for INTC_Control
+	MOV R1, #01
+	STR R1, [R0]		@NEWIRA bit set
+@FINALLY SERVICE BUTTON:D
+	LDR R0, =LEDSTATUS
+	LDR R1, [R0]
+	TST R1, #0x01
+	MOVNE R1, #0x00
+	MOVEQ R1, #0x01
+	STR R1, [R0]
+	LDMFD SP!, {R0-R3, LR}
+	SUBS PC, LR, #4 @Standard return for interrupts
+TIMER: STMFD R13!, {R5, R14} @Save used register to stack
+	LDR R5, =0x0009BC20		@setup timer value
+		SUB: SUBS R5, R5, #0x01 @decrement timer
+		BNE SUB					@look for timer
+	LDMFD R13!, {R5, PC}		@Return to mainline
+LED1:	STMFD R13!, {R4, R5, R14}
+	LDR R4, =0x00200000 @Bit 21 for USR LED 1
+	ADD R5, R0, #0x194	@Adding offset to GPIO1 Base address (GPIO1_SETDATAOUT)
+	STR R4, [R5]		@Writing high to USR LED 1
+	
+	BL TIMER			@Call to timer
+	
+	ADD R5, R0, #0x190	@Offset for GPI01_CLEARDATAOUT
+	STR R4, [R5]		@Sets USR LED 1 low
+	LDMFD R13!, {R4, R5, PC}		@Return to mainline
+LED2:
+	STMFD R13!, {R4, R5, R14}  @LEDs 1-4 are almost identical to LED1, only change is the GPIO pin
+	LDR R4, =0x00400000 		@GPIO1_22
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER
+	ADD R5, R0, #0x190
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+LED3: 
+STMFD R13!, {R4, R5, R14} @LEDs 1-4 are almost identical to LED1
+	LDR R4, =0x00800000 	@GPIO1_23
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER
+	ADD R5, R0, #0x190
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+LED4: 
+STMFD R13!, {R4, R5, R14} @LEDs 1-4 are almost identical to LED1
+	LDR R4, =0x01000000 	@GPIO1_24
+	ADD R5, R0, #0x194
+	STR R4, [R5]
+	BL TIMER
+	ADD R5, R0, #0x190
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+LEDALL: 
+	STMFD R13!, {R4, R5, R14} @Meaningless code added for fun, turns on all LEDs, then waits
+	LDR R4, =0x01E00000      @Turns off GPIO1_21-24
+	ADD R5, R0, #0x194		
+	STR R4, [R5]
+	BL TIMER					
+	BL TIMER
+	BL TIMER
+	ADD R5, R0, #0x190			@Turns off all LEDs then goes home.
+	STR R4, [R5]
+	LDMFD R13!, {R4, R5, PC}	
+.data	
+SYS_IRQ: .WORD 0
+LEDSTATUS: .HWORD 0x0
+.align 2
+STACK1:			.rept 256
+				.byte 0x00
+				.endr
+STACK2:			.rept 256
+				.byte 0x00
+				.endr
+.END
